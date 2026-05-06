@@ -497,18 +497,23 @@ class FileAgentWindow(QWidget):
                 self.session_list.setCurrentRow(i)
                 break
 
-    def _delete_session(self) -> None:
-        item = self.session_list.currentItem()
+    def _session_context_menu(self, pos) -> None:
+        from PyQt5.QtWidgets import QMenu
+        item = self.session_list.itemAt(pos)
         if item is None:
             return
-        tid = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        action = menu.addAction("删除此会话")
+        if menu.exec_(self.session_list.mapToGlobal(pos)) == action:
+            self._delete_session_by_id(item.data(Qt.UserRole))
+
+    def _delete_session_by_id(self, tid: str) -> None:
         delete_thread(self._db_path, tid)
         titles = _load_titles()
         titles.pop(tid, None)
         try:
             with open(_titles_file_path(), "w", encoding="utf-8") as f:
-                import json as _json
-                _json.dump(titles, f, ensure_ascii=False)
+                json.dump(titles, f, ensure_ascii=False)
         except Exception:
             pass
         if tid == self._current_thread_id:
@@ -516,9 +521,30 @@ class FileAgentWindow(QWidget):
         else:
             self._refresh_session_list()
 
+    def _clear_all_sessions(self) -> None:
+        from PyQt5.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "确认", "清空所有会话历史？") != QMessageBox.Yes:
+            return
+        for tid in list_threads(self._db_path):
+            delete_thread(self._db_path, tid)
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                json.dump({}, f)
+        except Exception:
+            pass
+        self._new_session()
+
+    def _delete_session(self) -> None:
+        item = self.session_list.currentItem()
+        if item is not None:
+            self._delete_session_by_id(item.data(Qt.UserRole))
+
     def _new_session(self) -> None:
         self._current_thread_id = str(uuid.uuid4())
-        self._rebuild_agent()
+        if self.agent is not None:
+            self.config = {"configurable": {"thread_id": self._current_thread_id}}
+        else:
+            self._rebuild_agent()
         self._clear_chat()
         self._refresh_session_list()
         self._append_assistant("新会话已开始。")
@@ -528,7 +554,10 @@ class FileAgentWindow(QWidget):
         if tid == self._current_thread_id:
             return
         self._current_thread_id = tid
-        self._rebuild_agent()
+        if self.agent is not None:
+            self.config = {"configurable": {"thread_id": tid}}
+        else:
+            self._rebuild_agent()
         self._clear_chat()
         msgs = get_thread_messages(self._db_path, tid)
         for msg in msgs:
@@ -610,12 +639,14 @@ class FileAgentWindow(QWidget):
         self.session_list = QListWidget()
         self.session_list.setObjectName("SessionList")
         self.session_list.itemClicked.connect(self._on_session_selected)
+        self.session_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.session_list.customContextMenuRequested.connect(self._session_context_menu)
         session_layout.addWidget(self.session_list, stretch=1)
 
-        self.btn_delete_session = QPushButton("删除会话")
-        self.btn_delete_session.setObjectName("TopButton")
-        self.btn_delete_session.clicked.connect(self._delete_session)
-        session_layout.addWidget(self.btn_delete_session)
+        self.btn_clear_all_sessions = QPushButton("清空全部")
+        self.btn_clear_all_sessions.setObjectName("TopButton")
+        self.btn_clear_all_sessions.clicked.connect(self._clear_all_sessions)
+        session_layout.addWidget(self.btn_clear_all_sessions)
 
         splitter.addWidget(session_panel)
 

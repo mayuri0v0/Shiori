@@ -215,8 +215,7 @@ def delete_thread(db_path: str, thread_id: str) -> None:
     import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
-    conn.execute('DELETE FROM checkpoint_blobs WHERE thread_id=?', (thread_id,))
-    conn.execute('DELETE FROM checkpoint_writes WHERE thread_id=?', (thread_id,))
+    conn.execute('DELETE FROM writes WHERE thread_id=?', (thread_id,))
     conn.commit()
 
 
@@ -224,32 +223,29 @@ def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
     import sqlite3, logging
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        # Iterate all checkpoints to reconstruct conversation pairs
+        cp = SqliteSaver(conn)
         config = {'configurable': {'thread_id': thread_id, 'checkpoint_ns': ''}}
-        history = list(checkpointer.list(config))
-        if not history:
+        tup = cp.get_tuple(config)
+        if tup is None:
             return []
-        # Use the latest checkpoint for full message list + structured_response
-        history.sort(key=lambda t: t.checkpoint.get('ts', ''))
-        tup = history[-1]
-        cv = tup.checkpoint.get('channel_values', {})
-        msgs = cv.get('messages', [])
-        # Build a map: index of each HumanMessage -> its position
-        # AI answer is in structured_response (last one), so we reconstruct
-        # by pairing human messages with checkpoints that have structured_response
-        result = []
-        # Collect all human messages
+        msgs = tup.checkpoint.get('channel_values', {}).get('messages', [])
         human_msgs = [m for m in msgs if getattr(m, 'type', '') == 'human']
-        # Collect all structured_response answers across checkpoints
+
+        sr_rows = conn.execute(
+            'SELECT type, value FROM writes WHERE thread_id=? AND channel="structured_response" ORDER BY checkpoint_id',
+            (thread_id,),
+        ).fetchall()
         answers = []
-        for t in history:
-            sr = t.checkpoint.get('channel_values', {}).get('structured_response')
-            if sr is not None:
-                answer = getattr(sr, 'answer', None)
-                if answer:
-                    answers.append(str(answer))
-        # Pair them up
+        for row in sr_rows:
+            try:
+                obj = cp.serde.loads_typed((row[0], row[1]))
+                a = getattr(obj, 'answer', None)
+                if a:
+                    answers.append(str(a))
+            except Exception:
+                pass
+
+        result = []
         for i, hm in enumerate(human_msgs):
             content = getattr(hm, 'content', '')
             if isinstance(content, list):
