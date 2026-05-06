@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from tools import list_directory, read_file, search_in_files
 # =========================
@@ -159,6 +159,7 @@ def create_file_agent(
     thread_id: str = "file-agent-default",
     settings: Optional[AgentSettings] = None,
     callbacks: Optional[list[Any]] = None,
+    db_path: str = ":memory:",
 ) -> tuple[Any, dict]:
     """创建一个用于本地文件管理/分析的 LangChain 代理及其配置。
 
@@ -167,6 +168,7 @@ def create_file_agent(
                    不同 ID 则彼此独立（适合 GUI / CLI 各自使用）。
         settings: 可选的 AgentSettings。若不传入则会直接报错（因为不允许回退环境变量）。
         callbacks: 运行时回调（GUI 用于流式输出与工具日志）。
+        db_path: SQLite 数据库路径，默认内存模式；传入文件路径则持久化。
     返回:
         (agent, config) 元组：
         - agent: 可直接调用 .invoke(...) 的 LangChain 代理
@@ -177,7 +179,9 @@ def create_file_agent(
             "create_file_agent 需要显式传入 settings（本项目不再从 .env/环境变量读取配置）。"
         )
 
-    checkpointer = InMemorySaver()
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
     model = _init_model(settings, callbacks=callbacks)
     tools = _build_tools(settings)
 
@@ -195,7 +199,50 @@ def create_file_agent(
     return agent, config
 
 
-if __name__ == "__main__":
+def list_threads(db_path: str) -> list[str]:
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        cur = conn.execute(
+            'SELECT DISTINCT thread_id FROM checkpoints ORDER BY checkpoint_id DESC'
+        )
+        return [row[0] for row in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
+    import sqlite3, pickle
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        cur = conn.execute(
+            'SELECT checkpoint FROM checkpoints WHERE thread_id=? ORDER BY checkpoint_id DESC LIMIT 1',
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return []
+        data = pickle.loads(row[0])
+        msgs = data.get('channel_values', {}).get('messages', [])
+        result = []
+        for m in msgs:
+            role = getattr(m, 'type', None) or getattr(m, 'role', 'unknown')
+            if role == 'human':
+                role = 'user'
+            elif role == 'ai':
+                role = 'assistant'
+            content = getattr(m, 'content', str(m))
+            if isinstance(content, list):
+                content = ' '.join(
+                    c.get('text', '') if isinstance(c, dict) else str(c) for c in content
+                )
+            result.append({'role': role, 'content': str(content)})
+        return result
+    except Exception:
+        return []
+
+
+if __name__ == '__main__':
     raise SystemExit(
-        "本项目已禁用 .env/环境变量读取。请运行 `python gui.py` 并在“设置”中填写 API 配置。"
+        'Please run `python gui.py` and fill in API settings.'
     )
