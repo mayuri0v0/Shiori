@@ -212,18 +212,15 @@ def list_threads(db_path: str) -> list[str]:
 
 
 def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
-    import sqlite3, pickle
+    import sqlite3, logging
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
-        cur = conn.execute(
-            'SELECT checkpoint FROM checkpoints WHERE thread_id=? ORDER BY checkpoint_id DESC LIMIT 1',
-            (thread_id,),
-        )
-        row = cur.fetchone()
-        if not row:
+        checkpointer = SqliteSaver(conn)
+        config = {'configurable': {'thread_id': thread_id, 'checkpoint_ns': ''}}
+        tup = checkpointer.get_tuple(config)
+        if tup is None:
             return []
-        data = pickle.loads(row[0])
-        msgs = data.get('channel_values', {}).get('messages', [])
+        msgs = tup.checkpoint.get('channel_values', {}).get('messages', [])
         result = []
         for m in msgs:
             role = getattr(m, 'type', None) or getattr(m, 'role', 'unknown')
@@ -239,6 +236,7 @@ def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
             result.append({'role': role, 'content': str(content)})
         return result
     except Exception:
+        logging.getLogger(__name__).exception('get_thread_messages failed for %s', thread_id)
         return []
 
 

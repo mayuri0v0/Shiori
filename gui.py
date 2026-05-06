@@ -113,6 +113,32 @@ def _db_path() -> str:
     return os.path.join(_app_data_dir(), "shiori_history.db")
 
 
+def _titles_file_path() -> str:
+    return os.path.join(_app_data_dir(), "shiori_titles.json")
+
+
+def _load_titles() -> dict:
+    path = _titles_file_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_title(thread_id: str, title: str) -> None:
+    titles = _load_titles()
+    if thread_id not in titles:
+        titles[thread_id] = title
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                json.dump(titles, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+
 def load_user_settings() -> dict[str, Any]:
     """读取用户设置（不存在则返回默认值）。"""
 
@@ -460,12 +486,12 @@ class FileAgentWindow(QWidget):
 
     def _refresh_session_list(self) -> None:
         self.session_list.clear()
-        threads = list_threads(self._db_path)
-        for tid in threads:
-            item = QListWidgetItem(tid[:8] + "...")
+        titles = _load_titles()
+        for tid in list_threads(self._db_path):
+            label = titles.get(tid) or tid[:8] + "..."
+            item = QListWidgetItem(label)
             item.setData(Qt.UserRole, tid)
             self.session_list.addItem(item)
-        # 高亮当前会话
         for i in range(self.session_list.count()):
             if self.session_list.item(i).data(Qt.UserRole) == self._current_thread_id:
                 self.session_list.setCurrentRow(i)
@@ -868,6 +894,7 @@ class FileAgentWindow(QWidget):
             return
 
         self._append_user(user_text)
+        _save_title(self._current_thread_id, user_text[:20])
         self.input_edit.clear()
 
         self._current_assistant_bubble = self._append_assistant("正在生成...")
