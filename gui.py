@@ -425,7 +425,7 @@ class AgentWorker(QObject):
         try:
             resp = self._agent.invoke(
                 {"messages": [{"role": "user", "content": self._user_text}]},
-                config=cfg,
+                config={**cfg, "recursion_limit": 50},
             )
             structured = resp.get("structured_response")
             if structured is not None:
