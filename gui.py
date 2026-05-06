@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
 )
 
-from main import AgentSettings, SYSTEM_PROMPT, create_file_agent, list_threads, get_thread_messages
+from main import AgentSettings, SYSTEM_PROMPT, create_file_agent, list_threads, get_thread_messages, delete_thread
 
 try:
     # 用于拿到 token/tool 事件，实现"流式输出 + 运行日志"
@@ -497,6 +497,25 @@ class FileAgentWindow(QWidget):
                 self.session_list.setCurrentRow(i)
                 break
 
+    def _delete_session(self) -> None:
+        item = self.session_list.currentItem()
+        if item is None:
+            return
+        tid = item.data(Qt.UserRole)
+        delete_thread(self._db_path, tid)
+        titles = _load_titles()
+        titles.pop(tid, None)
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                import json as _json
+                _json.dump(titles, f, ensure_ascii=False)
+        except Exception:
+            pass
+        if tid == self._current_thread_id:
+            self._new_session()
+        else:
+            self._refresh_session_list()
+
     def _new_session(self) -> None:
         self._current_thread_id = str(uuid.uuid4())
         self._rebuild_agent()
@@ -592,6 +611,11 @@ class FileAgentWindow(QWidget):
         self.session_list.setObjectName("SessionList")
         self.session_list.itemClicked.connect(self._on_session_selected)
         session_layout.addWidget(self.session_list, stretch=1)
+
+        self.btn_delete_session = QPushButton("删除会话")
+        self.btn_delete_session.setObjectName("TopButton")
+        self.btn_delete_session.clicked.connect(self._delete_session)
+        session_layout.addWidget(self.btn_delete_session)
 
         splitter.addWidget(session_panel)
 

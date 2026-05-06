@@ -211,29 +211,52 @@ def list_threads(db_path: str) -> list[str]:
         return []
 
 
+def delete_thread(db_path: str, thread_id: str) -> None:
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
+    conn.execute('DELETE FROM checkpoint_blobs WHERE thread_id=?', (thread_id,))
+    conn.execute('DELETE FROM checkpoint_writes WHERE thread_id=?', (thread_id,))
+    conn.commit()
+
+
 def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
     import sqlite3, logging
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
         checkpointer = SqliteSaver(conn)
+        # Iterate all checkpoints to reconstruct conversation pairs
         config = {'configurable': {'thread_id': thread_id, 'checkpoint_ns': ''}}
-        tup = checkpointer.get_tuple(config)
-        if tup is None:
+        history = list(checkpointer.list(config))
+        if not history:
             return []
-        msgs = tup.checkpoint.get('channel_values', {}).get('messages', [])
+        # Use the latest checkpoint for full message list + structured_response
+        history.sort(key=lambda t: t.checkpoint.get('ts', ''))
+        tup = history[-1]
+        cv = tup.checkpoint.get('channel_values', {})
+        msgs = cv.get('messages', [])
+        # Build a map: index of each HumanMessage -> its position
+        # AI answer is in structured_response (last one), so we reconstruct
+        # by pairing human messages with checkpoints that have structured_response
         result = []
-        for m in msgs:
-            role = getattr(m, 'type', None) or getattr(m, 'role', 'unknown')
-            if role == 'human':
-                role = 'user'
-            elif role == 'ai':
-                role = 'assistant'
-            content = getattr(m, 'content', str(m))
+        # Collect all human messages
+        human_msgs = [m for m in msgs if getattr(m, 'type', '') == 'human']
+        # Collect all structured_response answers across checkpoints
+        answers = []
+        for t in history:
+            sr = t.checkpoint.get('channel_values', {}).get('structured_response')
+            if sr is not None:
+                answer = getattr(sr, 'answer', None)
+                if answer:
+                    answers.append(str(answer))
+        # Pair them up
+        for i, hm in enumerate(human_msgs):
+            content = getattr(hm, 'content', '')
             if isinstance(content, list):
-                content = ' '.join(
-                    c.get('text', '') if isinstance(c, dict) else str(c) for c in content
-                )
-            result.append({'role': role, 'content': str(content)})
+                content = ' '.join(c.get('text', '') if isinstance(c, dict) else str(c) for c in content)
+            result.append({'role': 'user', 'content': str(content)})
+            if i < len(answers):
+                result.append({'role': 'assistant', 'content': answers[i]})
         return result
     except Exception:
         logging.getLogger(__name__).exception('get_thread_messages failed for %s', thread_id)
