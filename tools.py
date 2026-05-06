@@ -42,12 +42,15 @@ def list_directory(path: str) -> str:
 
 
 @tool
-def read_file(path: str, max_chars: int = 4000) -> str:
+def read_file(path: str, max_chars: int = 4000, start: int = 0) -> str:
     """读取指定文本文件内容，用于分析和总结。
 
-    注意事项：
-    - 仅按 UTF-8 尝试解码（errors="ignore"），二进制文件会被自动“过滤”掉
-    - 默认最多读取 max_chars 个字符，避免一次性加载超大文件
+    参数:
+        path: 文件绝对路径
+        max_chars: 最多读取的字符数（默认 4000）
+        start: 从第几个字符开始读取（默认 0，即从头开始）
+
+    注意：仅按 UTF-8 尝试解码，二进制文件会被自动过滤。
     """
 
     if not os.path.exists(path):
@@ -57,21 +60,18 @@ def read_file(path: str, max_chars: int = 4000) -> str:
 
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read(max_chars)
+            all_content = f.read()
     except Exception as e:
         return f"读取文件失败：{e}"
 
-    suffix = ""
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            all_content = f.read()
-        if len(all_content) > len(content):
-            suffix = "\n\n[内容已截断，仅显示前部分。]"
-    except Exception:
-        # 如果重新读取失败，就忽略截断提示
-        pass
+    total = len(all_content)
+    if start >= total:
+        return f"文件路径：{path}\n文件总字符数：{total}，start={start} 已超出文件末尾，无更多内容。"
 
-    return f"文件路径：{path}\n=== 内容开始 ===\n{content}{suffix}"
+    chunk = all_content[start: start + max_chars]
+    end = start + len(chunk)
+    suffix = f"\n\n[已读取字符 {start}–{end} / 共 {total}。{'文件已读完。' if end >= total else f'如需继续，请用 start={end} 调用。'}]"
+    return f"文件路径：{path}\n=== 内容开始 ===\n{chunk}{suffix}"
 
 
 @tool
@@ -107,8 +107,8 @@ def search_in_files(root: str, keyword: str, max_results: int = 20) -> str:
                 continue
 
     if not matches:
-        return f"在目录 {root} 下未找到包含“{keyword}”的文本文件。"
+        return f"在目录 {root} 下未找到包含 {keyword!r} 的文本文件。"
 
-    header = f"在目录 {root} 下找到包含“{keyword}”的文件（最多 {max_results} 条）："
+    header = f"在目录 {root} 下找到包含 {keyword!r} 的文件（最多 {max_results} 条）："
     return header + "\n" + "\n".join(matches)
 

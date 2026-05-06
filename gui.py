@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -20,6 +21,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPlainTextEdit,
     QWidget,
     QScrollArea,
@@ -31,10 +34,10 @@ from PyQt5.QtWidgets import (
     QPushButton,
 )
 
-from main import AgentSettings, SYSTEM_PROMPT, create_file_agent  # 业务模块：Agent 工厂与默认配置
+from main import AgentSettings, SYSTEM_PROMPT, create_file_agent, list_threads, get_thread_messages, delete_thread
 
 try:
-    # 用于拿到 token/tool 事件，实现“流式输出 + 运行日志”
+    # 用于拿到 token/tool 事件，实现"流式输出 + 运行日志"
     from langchain_core.callbacks import BaseCallbackHandler
 except Exception:  # pragma: no cover
     BaseCallbackHandler = object  # type: ignore[misc,assignment]
@@ -49,10 +52,10 @@ def resource_path(relative_path: str) -> str:
 
 
 def load_embedded_fonts() -> list[str]:
-    """加载随程序分发的字体文件，并返回“成功注册”的字体 family 列表。
+    """加载随程序分发的字体文件，并返回"成功注册"的字体 family 列表。
 
     说明：
-    - 这里的“内置”指把字体文件随程序一起分发（源码运行时放在 assets/fonts 下，
+    - 这里的"内置"指把字体文件随程序一起分发（源码运行时放在 assets/fonts 下，
       打包时通过 PyInstaller 的 --add-data 一并打进可执行文件）。
     - 只要成功 addApplicationFont，Qt 就可以通过 font-family 使用该字体。
     """
@@ -96,12 +99,44 @@ def load_embedded_fonts() -> list[str]:
     return unique
 
 
-def _settings_file_path() -> str:
-    """用户设置保存路径（Windows: %APPDATA%\\Shiori\\shiori_settings.json）。"""
-
+def _app_data_dir() -> str:
     base = QStandardPaths.writableLocation(QStandardPaths.AppConfigLocation)
     os.makedirs(base, exist_ok=True)
-    return os.path.join(base, "shiori_settings.json")
+    return base
+
+
+def _settings_file_path() -> str:
+    return os.path.join(_app_data_dir(), "shiori_settings.json")
+
+
+def _db_path() -> str:
+    return os.path.join(_app_data_dir(), "shiori_history.db")
+
+
+def _titles_file_path() -> str:
+    return os.path.join(_app_data_dir(), "shiori_titles.json")
+
+
+def _load_titles() -> dict:
+    path = _titles_file_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_title(thread_id: str, title: str) -> None:
+    titles = _load_titles()
+    if thread_id not in titles:
+        titles[thread_id] = title
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                json.dump(titles, f, ensure_ascii=False)
+        except Exception:
+            pass
 
 
 def load_user_settings() -> dict[str, Any]:
@@ -220,7 +255,7 @@ class SettingsDialog(QDialog):
         prompt_layout.addWidget(tip)
         self.prompt_edit = QPlainTextEdit(
             str(self._settings.get("system_prompt") or SYSTEM_PROMPT))
-        self.prompt_edit.setPlaceholderText("在这里输入你自己的系统提示词…")
+        self.prompt_edit.setPlaceholderText("在这里输入你自己的系统提示词...")
         prompt_layout.addWidget(self.prompt_edit, stretch=1)
         tabs.addTab(tab_prompt, "提示词")
 
@@ -390,7 +425,7 @@ class AgentWorker(QObject):
         try:
             resp = self._agent.invoke(
                 {"messages": [{"role": "user", "content": self._user_text}]},
-                config=cfg,
+                config={**cfg, "recursion_limit": 50},
             )
             structured = resp.get("structured_response")
             if structured is not None:
@@ -414,9 +449,12 @@ class FileAgentWindow(QWidget):
         super().__init__()
         self.setWindowFlags(Qt.Window)
         self.setWindowTitle("Shiori")
-        self.is_dark_mode = False  # 默认为亮色模式
+        self.is_dark_mode = False
 
         self.settings = load_user_settings()
+        self._db_path = _db_path()
+        self._current_thread_id: str = str(uuid.uuid4())
+
         self._rebuild_agent()
 
         self._worker_thread: Optional[QThread] = None
@@ -426,6 +464,7 @@ class FileAgentWindow(QWidget):
 
         self._init_ui()
         self._apply_theme()
+        self._refresh_session_list()
 
         self._append_assistant(
             "你好，我是 Shiori, 一个agent助手。\n"
@@ -433,24 +472,105 @@ class FileAgentWindow(QWidget):
         )
 
     def _rebuild_agent(self) -> None:
-        """根据当前 settings 重建 agent。
-
-        注意：现在 main.py 会严格要求 settings 中必须包含 api_key/base_url/model，
-        否则会抛 ValueError。GUI 侧需要容错：允许先打开界面，再去设置里填写。
-        """
-
         agent_settings = settings_to_agent_settings(self.settings)
         try:
             self.agent, self.config = create_file_agent(
-                thread_id="file-agent-gui",
+                thread_id=self._current_thread_id,
                 settings=agent_settings,
                 callbacks=None,
+                db_path=self._db_path,
             )
         except Exception as e:
-            # 允许 GUI 启动，但禁用发送；用户需在“设置”中补齐参数
             self.agent, self.config = None, {}
-            # log_view 可能还没初始化，先把错误暂存到 settings
             self.settings["_last_agent_error"] = str(e)
+
+    def _refresh_session_list(self) -> None:
+        self.session_list.clear()
+        titles = _load_titles()
+        for tid in list_threads(self._db_path):
+            label = titles.get(tid) or tid[:8] + "..."
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, tid)
+            self.session_list.addItem(item)
+        for i in range(self.session_list.count()):
+            if self.session_list.item(i).data(Qt.UserRole) == self._current_thread_id:
+                self.session_list.setCurrentRow(i)
+                break
+
+    def _session_context_menu(self, pos) -> None:
+        from PyQt5.QtWidgets import QMenu
+        item = self.session_list.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self)
+        action = menu.addAction("删除此会话")
+        if menu.exec_(self.session_list.mapToGlobal(pos)) == action:
+            self._delete_session_by_id(item.data(Qt.UserRole))
+
+    def _delete_session_by_id(self, tid: str) -> None:
+        delete_thread(self._db_path, tid)
+        titles = _load_titles()
+        titles.pop(tid, None)
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                json.dump(titles, f, ensure_ascii=False)
+        except Exception:
+            pass
+        if tid == self._current_thread_id:
+            self._new_session()
+        else:
+            self._refresh_session_list()
+
+    def _clear_all_sessions(self) -> None:
+        from PyQt5.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "确认", "清空所有会话历史？") != QMessageBox.Yes:
+            return
+        for tid in list_threads(self._db_path):
+            delete_thread(self._db_path, tid)
+        try:
+            with open(_titles_file_path(), "w", encoding="utf-8") as f:
+                json.dump({}, f)
+        except Exception:
+            pass
+        self._new_session()
+
+    def _delete_session(self) -> None:
+        item = self.session_list.currentItem()
+        if item is not None:
+            self._delete_session_by_id(item.data(Qt.UserRole))
+
+    def _new_session(self) -> None:
+        self._current_thread_id = str(uuid.uuid4())
+        if self.agent is not None:
+            self.config = {"configurable": {"thread_id": self._current_thread_id}}
+        else:
+            self._rebuild_agent()
+        self._clear_chat()
+        self._refresh_session_list()
+        self._append_assistant("新会话已开始。")
+
+    def _on_session_selected(self, item: QListWidgetItem) -> None:
+        tid = item.data(Qt.UserRole)
+        if tid == self._current_thread_id:
+            return
+        self._current_thread_id = tid
+        if self.agent is not None:
+            self.config = {"configurable": {"thread_id": tid}}
+        else:
+            self._rebuild_agent()
+        self._clear_chat()
+        msgs = get_thread_messages(self._db_path, tid)
+        for msg in msgs:
+            if msg["role"] == "user":
+                self._append_user(msg["content"])
+            elif msg["role"] == "assistant" and msg["content"].strip():
+                self._append_assistant(msg["content"])
+
+    def _clear_chat(self) -> None:
+        while self.chat_layout.count() > 1:
+            item = self.chat_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
 
     def _toggle_theme(self) -> None:
         self.is_dark_mode = not self.is_dark_mode
@@ -497,6 +617,38 @@ class FileAgentWindow(QWidget):
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setObjectName("MainSplitter")
+
+        # 会话列表面板
+        session_panel = QFrame()
+        session_panel.setObjectName("SessionPanel")
+        session_layout = QVBoxLayout(session_panel)
+        session_layout.setContentsMargins(8, 8, 8, 8)
+        session_layout.setSpacing(6)
+
+        session_header = QHBoxLayout()
+        session_title = QLabel("会话")
+        session_title.setObjectName("LogTitle")
+        session_header.addWidget(session_title)
+        session_header.addStretch(1)
+        self.btn_new_session = QPushButton("新建")
+        self.btn_new_session.setObjectName("TopButton")
+        self.btn_new_session.clicked.connect(self._new_session)
+        session_header.addWidget(self.btn_new_session)
+        session_layout.addLayout(session_header)
+
+        self.session_list = QListWidget()
+        self.session_list.setObjectName("SessionList")
+        self.session_list.itemClicked.connect(self._on_session_selected)
+        self.session_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.session_list.customContextMenuRequested.connect(self._session_context_menu)
+        session_layout.addWidget(self.session_list, stretch=1)
+
+        self.btn_clear_all_sessions = QPushButton("清空全部")
+        self.btn_clear_all_sessions.setObjectName("TopButton")
+        self.btn_clear_all_sessions.clicked.connect(self._clear_all_sessions)
+        session_layout.addWidget(self.btn_clear_all_sessions)
+
+        splitter.addWidget(session_panel)
 
         left = QFrame()
         left.setObjectName("LeftPanel")
@@ -575,8 +727,9 @@ class FileAgentWindow(QWidget):
         log_layout.addWidget(self.log_view, stretch=1)
 
         splitter.addWidget(self.log_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 1)  # session panel
+        splitter.setStretchFactor(1, 3)  # chat panel
+        splitter.setStretchFactor(2, 2)  # log panel
 
         root.addWidget(splitter, stretch=1)
 
@@ -588,7 +741,7 @@ class FileAgentWindow(QWidget):
         if last_err:
             self._log(f"[init] Agent 初始化失败：{last_err}\n\n")
             self._append_assistant(
-                "我还没准备好：请先点右上角“设置”，填写 API Key / Base URL / Model，然后再开始对话。")
+                "我还没准备好：请先点右上角设置，填写 API Key / Base URL / Model，然后再开始对话。")
             self._set_busy(True)
             self.btn_stop.setEnabled(False)
 
@@ -684,6 +837,24 @@ class FileAgentWindow(QWidget):
                 color: {text_primary};
             }}
 
+            /* 会话面板 */
+            #SessionPanel {{
+                border-right: 1px solid {border_color};
+            }}
+            #SessionList {{
+                background: {bg_main};
+                color: {text_primary};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+            }}
+            #SessionList::item {{
+                padding: 8px;
+                border-radius: 4px;
+            }}
+            #SessionList::item:selected {{
+                background: {border_color};
+            }}
+
             /* 运行详情日志 */
             #LogPanel {{
                 border-left: 1px solid {border_color};
@@ -728,7 +899,7 @@ class FileAgentWindow(QWidget):
             if self.agent is None:
                 self._log("[settings] 设置未完整，Agent 仍无法初始化。\n\n")
                 self._append_assistant(
-                    "设置还不完整或无法连接模型：请检查 API Key / Base URL / Model。")
+                    "当前未初始化模型连接。请先在设置里填写 API Key / Base URL / Model。")
                 self._set_busy(True)
                 self.btn_stop.setEnabled(False)
             else:
@@ -774,13 +945,14 @@ class FileAgentWindow(QWidget):
             return
         if self.agent is None:
             self._append_assistant(
-                "当前未初始化模型连接。请先在“设置”里填写 API Key / Base URL / Model。")
+                "当前未初始化模型连接。请先在设置里填写 API Key / Base URL / Model。")
             return
 
         self._append_user(user_text)
+        _save_title(self._current_thread_id, user_text[:20])
         self.input_edit.clear()
 
-        self._current_assistant_bubble = self._append_assistant("正在生成…")
+        self._current_assistant_bubble = self._append_assistant("正在生成...")
         self._current_assistant_bubble.set_text("")
         self._received_stream_token = False
 
@@ -842,6 +1014,7 @@ class FileAgentWindow(QWidget):
                 if len(self._current_assistant_bubble.text.strip()) < len(answer.strip()):
                     self._current_assistant_bubble.set_text(answer)
         self._set_busy(False)
+        self._refresh_session_list()
 
     def _on_worker_failed(self, err: str) -> None:
         if self._current_assistant_bubble is not None:

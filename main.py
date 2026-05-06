@@ -3,7 +3,7 @@ from typing import Any, Callable, List, Optional
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from tools import list_directory, read_file, search_in_files
 # =========================
@@ -25,6 +25,8 @@ SYSTEM_PROMPT = """你是一个专业的本地文件智能助手，擅长：
 - 优先使用工具获取真实文件信息，不要凭空捏造文件内容
 - 对删除、覆盖等破坏性操作务必先向用户确认（目前工具中未直接提供删除功能）
 - 如果路径不确定，请先向用户确认或建议用户提供绝对路径
+- 每个文件或目录只需读取一次，不要重复调用同一工具处理同一路径
+- 获取到足够信息后立即给出回答，不要继续调用工具
 
 回答时请使用简体中文，说明你做了哪些操作，并给出清晰的下一步建议。"""
 
@@ -159,6 +161,7 @@ def create_file_agent(
     thread_id: str = "file-agent-default",
     settings: Optional[AgentSettings] = None,
     callbacks: Optional[list[Any]] = None,
+    db_path: str = ":memory:",
 ) -> tuple[Any, dict]:
     """创建一个用于本地文件管理/分析的 LangChain 代理及其配置。
 
@@ -167,6 +170,7 @@ def create_file_agent(
                    不同 ID 则彼此独立（适合 GUI / CLI 各自使用）。
         settings: 可选的 AgentSettings。若不传入则会直接报错（因为不允许回退环境变量）。
         callbacks: 运行时回调（GUI 用于流式输出与工具日志）。
+        db_path: SQLite 数据库路径，默认内存模式；传入文件路径则持久化。
     返回:
         (agent, config) 元组：
         - agent: 可直接调用 .invoke(...) 的 LangChain 代理
@@ -177,7 +181,9 @@ def create_file_agent(
             "create_file_agent 需要显式传入 settings（本项目不再从 .env/环境变量读取配置）。"
         )
 
-    checkpointer = InMemorySaver()
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
     model = _init_model(settings, callbacks=callbacks)
     tools = _build_tools(settings)
 
@@ -195,7 +201,67 @@ def create_file_agent(
     return agent, config
 
 
-if __name__ == "__main__":
+def list_threads(db_path: str) -> list[str]:
+    import sqlite3
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        cur = conn.execute(
+            'SELECT DISTINCT thread_id FROM checkpoints ORDER BY checkpoint_id DESC'
+        )
+        return [row[0] for row in cur.fetchall()]
+    except Exception:
+        return []
+
+
+def delete_thread(db_path: str, thread_id: str) -> None:
+    import sqlite3
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
+    conn.execute('DELETE FROM writes WHERE thread_id=?', (thread_id,))
+    conn.commit()
+
+
+def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
+    import sqlite3, logging
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        cp = SqliteSaver(conn)
+        config = {'configurable': {'thread_id': thread_id, 'checkpoint_ns': ''}}
+        tup = cp.get_tuple(config)
+        if tup is None:
+            return []
+        msgs = tup.checkpoint.get('channel_values', {}).get('messages', [])
+        human_msgs = [m for m in msgs if getattr(m, 'type', '') == 'human']
+
+        sr_rows = conn.execute(
+            'SELECT type, value FROM writes WHERE thread_id=? AND channel="structured_response" ORDER BY checkpoint_id',
+            (thread_id,),
+        ).fetchall()
+        answers = []
+        for row in sr_rows:
+            try:
+                obj = cp.serde.loads_typed((row[0], row[1]))
+                a = getattr(obj, 'answer', None)
+                if a:
+                    answers.append(str(a))
+            except Exception:
+                pass
+
+        result = []
+        for i, hm in enumerate(human_msgs):
+            content = getattr(hm, 'content', '')
+            if isinstance(content, list):
+                content = ' '.join(c.get('text', '') if isinstance(c, dict) else str(c) for c in content)
+            result.append({'role': 'user', 'content': str(content)})
+            if i < len(answers):
+                result.append({'role': 'assistant', 'content': answers[i]})
+        return result
+    except Exception:
+        logging.getLogger(__name__).exception('get_thread_messages failed for %s', thread_id)
+        return []
+
+
+if __name__ == '__main__':
     raise SystemExit(
-        "本项目已禁用 .env/环境变量读取。请运行 `python gui.py` 并在“设置”中填写 API 配置。"
+        'Please run `python gui.py` and fill in API settings.'
     )
