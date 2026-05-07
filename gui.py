@@ -774,7 +774,8 @@ class FileAgentWindow(QWidget):
             QWidget {{
                 background: {bg_main};
                 color: {text_primary};
-                font-family: "Inter", "HarmonyOS Sans SC", sans-serif;
+                font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif;
+                font-size: 14px;
             }}
 
             /* 分割线 */
