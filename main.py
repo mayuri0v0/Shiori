@@ -1,3 +1,5 @@
+import logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
@@ -181,7 +183,6 @@ def create_file_agent(
             "create_file_agent 需要显式传入 settings（本项目不再从 .env/环境变量读取配置）。"
         )
 
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
     model = _init_model(settings, callbacks=callbacks)
@@ -202,7 +203,6 @@ def create_file_agent(
 
 
 def list_threads(db_path: str) -> list[str]:
-    import sqlite3
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
         cur = conn.execute(
@@ -214,7 +214,6 @@ def list_threads(db_path: str) -> list[str]:
 
 
 def delete_thread(db_path: str, thread_id: str) -> None:
-    import sqlite3
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
     conn.execute('DELETE FROM writes WHERE thread_id=?', (thread_id,))
@@ -222,7 +221,6 @@ def delete_thread(db_path: str, thread_id: str) -> None:
 
 
 def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:
-    import sqlite3, logging
     try:
         conn = sqlite3.connect(db_path, check_same_thread=False)
         cp = SqliteSaver(conn)

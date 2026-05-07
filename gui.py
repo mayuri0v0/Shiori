@@ -52,50 +52,28 @@ def resource_path(relative_path: str) -> str:
 
 
 def load_embedded_fonts() -> list[str]:
-    """加载随程序分发的字体文件，并返回"成功注册"的字体 family 列表。
+    """加载 assets/fonts/ 下所有字体文件，返回注册成功的字体 family 列表。"""
 
-    说明：
-    - 这里的"内置"指把字体文件随程序一起分发（源码运行时放在 assets/fonts 下，
-      打包时通过 PyInstaller 的 --add-data 一并打进可执行文件）。
-    - 只要成功 addApplicationFont，Qt 就可以通过 font-family 使用该字体。
-    """
-
-    # 你可以把字体文件放到项目的 assets/fonts/ 目录下
     fonts_dir = resource_path(os.path.join("assets", "fonts"))
-
-    # 常见建议文件名（你可以自行替换/增删，只要是 .ttf/.otf 都行）
-    candidates = [
-        "Inter-Regular.ttf",
-        "Inter-SemiBold.ttf",
-        "Inter-Bold.ttf",
-        "HarmonyOS_Sans_SC_Regular.ttf",
-        "HarmonyOS_Sans_SC_Medium.ttf",
-        "HarmonyOS_Sans_SC_Bold.ttf",
-    ]
+    if not os.path.isdir(fonts_dir):
+        return []
 
     registered_families: list[str] = []
-
-    for name in candidates:
-        path = os.path.join(fonts_dir, name)
-        if not os.path.exists(path):
+    for fname in sorted(os.listdir(fonts_dir)):
+        if not fname.lower().endswith((".ttf", ".otf")):
             continue
-
-        font_id = QFontDatabase.addApplicationFont(path)
+        font_path = os.path.join(fonts_dir, fname)
+        font_id = QFontDatabase.addApplicationFont(font_path)
         if font_id == -1:
             continue
+        registered_families.extend(QFontDatabase.applicationFontFamilies(font_id))
 
-        families = QFontDatabase.applicationFontFamilies(font_id)
-        registered_families.extend(families)
-
-    # 去重但保持相对稳定的顺序
     seen: set[str] = set()
     unique: list[str] = []
     for fam in registered_families:
-        if fam in seen:
-            continue
-        seen.add(fam)
-        unique.append(fam)
-
+        if fam not in seen:
+            seen.add(fam)
+            unique.append(fam)
     return unique
 
 
@@ -130,13 +108,12 @@ def _load_titles() -> dict:
 
 def _save_title(thread_id: str, title: str) -> None:
     titles = _load_titles()
-    if thread_id not in titles:
-        titles[thread_id] = title
-        try:
-            with open(_titles_file_path(), "w", encoding="utf-8") as f:
-                json.dump(titles, f, ensure_ascii=False)
-        except Exception:
-            pass
+    titles[thread_id] = title
+    try:
+        with open(_titles_file_path(), "w", encoding="utf-8") as f:
+            json.dump(titles, f, ensure_ascii=False)
+    except Exception:
+        pass
 
 
 def load_user_settings() -> dict[str, Any]:
@@ -865,18 +842,18 @@ class FileAgentWindow(QWidget):
                 border: none;
             }}
             
-            /* 滚动条极简化 * /
-            QScrollBar: vertical {{
+            /* 滚动条极简化 */
+            QScrollBar:vertical {{
                 border: none;
                 background: {bg_main};
                 width: 8px;
             }}
-            QScrollBar: : handle: vertical {{
+            QScrollBar::handle:vertical {{
                 background: {border_color};
                 border-radius: 4px;
                 min-height: 20px;
             }}
-            QScrollBar: : add-line: vertical, QScrollBar: : sub-line: vertical {{border: none; background: none; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{border: none; background: none; }}
         """)
 
     def _model_chip_text(self) -> str:
@@ -1022,11 +999,14 @@ class FileAgentWindow(QWidget):
         self._set_busy(False)
 
     def _cleanup_worker(self, *_: Any) -> None:
-        if self._worker_thread is not None:
-            self._worker_thread.quit()
-            self._worker_thread.wait(1500)
+        thread = self._worker_thread
+        if thread is None:
+            return
         self._worker_thread = None
         self._worker = None
+        thread.quit()
+        thread.wait(3000)
+        thread.deleteLater()
 
 
 def main() -> None:
