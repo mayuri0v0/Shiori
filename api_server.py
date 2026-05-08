@@ -8,16 +8,32 @@ import socket
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import create_file_agent, AgentSettings, SYSTEM_PROMPT
 
-STRICT_SYSTEM_PROMPT = """你是一个本地文件助手。
+STRICT_SYSTEM_PROMPT = """你是一个本地文件助手，工作在 Windows 系统上。
 
-规则：
-1. 只有当用户明确要求操作文件或目录时，才调用工具
-2. 普通对话（问候、问答等）直接回复，不调用任何工具
-3. 路径必须由用户提供，不要自行猜测或遍历
-4. 每次只调用一个工具，获得结果后立即回复用户
-5. 系统是 Windows，路径格式为 D:\\xxx，不要使用 / 开头的路径
+## 回复决策流程（严格遵守）
 
-回答使用简体中文。"""
+收到用户消息后，按以下流程决定如何回复：
+
+### 第1步：判断意图
+用户是否明确要求了文件操作？
+  - 文件操作仅包括：列出目录内容、读取文件、搜索文件内容
+  - 明确要求的特征：用户指定了具体路径 + 操作动词（列出/读取/搜索/查看/找）
+
+### 第2步：选择回复方式
+  - 如果用户只是问候（如"你好"）、闲聊、问概念性问题 → 直接回复，不调用工具
+  - 只有当用户明确说了路径和操作，才调用对应工具
+  - 如果用户请求模糊（只说"帮我看看文件"没有路径）→ 先询问用户要操作哪个路径
+
+### 第3步：工具使用限制
+  - 每次只调用一个工具
+  - 获得结果后立即向用户报告，不要连续调用多个工具
+
+## 路径规则
+- 路径由用户提供，禁止猜测或自行构造
+- Windows 格式：D:\\xxx\\yyy
+
+## 回答风格
+- 使用简体中文，语气友好直接"""
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -90,38 +106,51 @@ def chat():
     def generate():
         global stop_flag
         stop_flag = False
-        try:
-            tool_call_count = 0
-            for chunk in agent.stream(
-                {"messages": [{"role": "user", "content": message}]},
-                {**config, "recursion_limit": 25},
-                stream_mode='updates'
-            ):
-                if stop_flag:
-                    yield f"data: {json.dumps({'type': 'error', 'data': '已停止'})}\n\n"
-                    return
-                for node_name, node_data in chunk.items():
-                    if node_name == 'tools' and 'messages' in node_data:
-                        tool_call_count += 1
-                        if tool_call_count > 10:
-                            yield f"data: {json.dumps({'type': 'error', 'data': '工具调用次数超过限制，已停止'})}\n\n"
-                            return
-                        for msg in node_data['messages']:
-                            event = {'type': 'tool_end', 'tool': getattr(msg, 'name', ''), 'output': str(getattr(msg, 'content', ''))[:300]}
-                            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    elif 'messages' in node_data:
-                        for msg in node_data['messages']:
-                            for tc in getattr(msg, 'tool_calls', []):
-                                event = {'type': 'tool_start', 'tool': tc.get('name',''), 'input': str(tc.get('args',''))[:200]}
+        max_retries = 3
+        last_error = None
+        for attempt in range(max_retries):
+            if stop_flag:
+                return
+            try:
+                tool_call_count = 0
+                for chunk in agent.stream(
+                    {"messages": [{"role": "user", "content": message}]},
+                    {**config, "recursion_limit": 25},
+                    stream_mode='updates'
+                ):
+                    if stop_flag:
+                        yield f"data: {json.dumps({'type': 'error', 'data': '已停止'})}\n\n"
+                        return
+                    for node_name, node_data in chunk.items():
+                        if node_name == 'tools' and 'messages' in node_data:
+                            tool_call_count += 1
+                            if tool_call_count > 10:
+                                yield f"data: {json.dumps({'type': 'error', 'data': '工具调用次数超过限制，已停止'})}\n\n"
+                                return
+                            for msg in node_data['messages']:
+                                event = {'type': 'tool_end', 'tool': getattr(msg, 'name', ''), 'output': str(getattr(msg, 'content', ''))[:300]}
                                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    if 'structured_response' in node_data:
-                        sr = node_data['structured_response']
-                        answer = getattr(sr, 'answer', str(sr))
-                        yield f"data: {json.dumps({'type': 'content', 'data': answer}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
+                        elif 'messages' in node_data:
+                            for msg in node_data['messages']:
+                                for tc in getattr(msg, 'tool_calls', []):
+                                    event = {'type': 'tool_start', 'tool': tc.get('name',''), 'input': str(tc.get('args',''))[:200]}
+                                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                        if 'structured_response' in node_data:
+                            sr = node_data['structured_response']
+                            answer = getattr(sr, 'answer', str(sr))
+                            yield f"data: {json.dumps({'type': 'content', 'data': answer}, ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                last_error = e
+                if '503' in str(e) or 'service_unavailable' in str(e) or 'busy' in str(e):
+                    if attempt < max_retries - 1:
+                        import time
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                break
+        import traceback; traceback.print_exc()
+        yield f"data: {json.dumps({'type': 'error', 'data': str(last_error)}, ensure_ascii=False)}\n\n"
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

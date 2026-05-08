@@ -9,29 +9,38 @@ from tools import list_directory, read_file, search_in_files
 # =========================
 # 系统提示 & 响应结构
 # =========================
-#
-# 这一段主要定义：
-# 1. Agent 的“身份”和行为规范（SYSTEM_PROMPT）
-# 2. Agent 输出时的结构化数据格式（ResponseFormat）
-#
-# LangChain 会将 SYSTEM_PROMPT 当成系统级提示词，
-# 决定 Agent 在调用工具时的策略和回答风格。
 
-SYSTEM_PROMPT = """你是一个本地文件助手。
+SYSTEM_PROMPT = """你是一个本地文件助手，工作在 Windows 系统上。
 
-规则：
-1. 只有当用户明确要求操作文件或目录时，才调用工具
-2. 普通对话（问候、问答等）直接回复，不调用任何工具
-3. 路径必须由用户提供，不要自行猜测或遍历
-4. 每次只调用一个工具，获得结果后立即回复用户
-5. 系统是 Windows，路径格式为 D:\\xxx，不要使用 / 开头的路径
+## 回复决策流程（严格遵守）
 
-回答使用简体中文。"""
+收到用户消息后，按以下流程决定如何回复：
+
+### 第1步：判断意图
+用户是否明确要求了文件操作？
+  - 文件操作仅包括：列出目录内容、读取文件、搜索文件内容
+  - 明确要求的特征：用户指定了具体路径 + 操作动词（列出/读取/搜索/查看/找）
+
+### 第2步：选择回复方式
+  - 如果用户只是问候（如"你好"）、闲聊、问概念性问题 → 直接回复，不调用工具
+  - 只有当用户明确说了路径和操作，才调用对应工具
+  - 如果用户请求模糊（只说"帮我看看文件"没有路径）→ 先询问用户要操作哪个路径
+
+### 第3步：工具使用限制
+  - 每次只调用一个工具
+  - 获得结果后立即向用户报告，不要连续调用多个工具
+
+## 路径规则
+- 路径由用户提供，禁止猜测或自行构造
+- Windows 格式：D:\\xxx\\yyy
+
+## 回答风格
+- 使用简体中文，语气友好直接"""
 
 
 @dataclass
 class AgentSettings:
-    """创建 Agent/模型所需的可配置项（用于 GUI 的“设置”页）。
+    """创建 Agent/模型所需的可配置项（用于 GUI 的"设置"页）。
 
     约定：
     - 本项目不再依赖环境变量/.env；所有模型连接参数必须由 settings 显式提供
@@ -91,9 +100,9 @@ def _init_model(settings: AgentSettings, callbacks: Optional[list[Any]] = None) 
     """根据设置初始化底层 ChatModel。
 
     说明：
-    - 为了兼容不同版本/不同 provider，这里对 streaming 参数做了“尽力而为”式传递：
+    - 为了兼容不同版本/不同 provider，这里对 streaming 参数做了"尽力而为"式传递：
       如果当前 init_chat_model 不支持 streaming，会自动捕获 TypeError 并降级。
-    - callbacks 用于 GUI 侧做“流式 token 回调”和“工具调用日志”。
+    - callbacks 用于 GUI 侧做"流式 token 回调"和"工具调用日志"。
     """
 
     # 只依赖 settings，不再隐式回退环境变量（GUI/调用方应显式提供）
@@ -112,7 +121,7 @@ def _init_model(settings: AgentSettings, callbacks: Optional[list[Any]] = None) 
         raise ValueError(
             "AgentSettings 缺少必要字段："
             + ", ".join(missing)
-            + "。请在 GUI 的“设置”里填写，或在代码中显式传入 AgentSettings。"
+            + "。请在 GUI 的「设置」里填写，或在代码中显式传入 AgentSettings。"
         )
 
     kwargs: dict[str, Any] = {
