@@ -1,12 +1,10 @@
 langchain-core
-typing-extensions
 langgraph
+langgraph-checkpoint-sqlite
 langchain
 langchain-openai
 langchain-deepseek
 langchain-anthropic
 pydantic>=2.6.0
-pydantic-settings>=2.3.0
 openai>=1.35.0
-python-dotenv>=1.0.0
 PyQt5
